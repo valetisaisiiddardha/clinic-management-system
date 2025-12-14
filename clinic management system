@@ -1,0 +1,318 @@
+# clinic_management.py
+import sqlite3
+from datetime import datetime, date
+import hashlib
+from typing import Optional, List, Dict, Tuple
+
+class ClinicManagementSystem:
+    def __init__(self, db_name: str = "clinic.db"):
+        self.conn = sqlite3.connect(db_name)
+        self.cursor = self.conn.cursor()
+        self.create_tables()
+    
+    def create_tables(self):
+        """Create necessary tables for the clinic management system"""
+        tables = [
+            '''CREATE TABLE IF NOT EXISTS patients (
+                patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                date_of_birth DATE,
+                gender TEXT,
+                phone TEXT,
+                email TEXT UNIQUE,
+                address TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+            
+            '''CREATE TABLE IF NOT EXISTS doctors (
+                doctor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                specialization TEXT,
+                license_number TEXT UNIQUE,
+                phone TEXT,
+                email TEXT UNIQUE,
+                consultation_fee REAL DEFAULT 0.0,
+                available_days TEXT,
+                start_time TIME,
+                end_time TIME
+            )''',
+            
+            '''CREATE TABLE IF NOT EXISTS appointments (
+                appointment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER,
+                doctor_id INTEGER,
+                appointment_date DATE NOT NULL,
+                appointment_time TIME NOT NULL,
+                status TEXT DEFAULT 'Scheduled',
+                reason TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
+                FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id)
+            )''',
+            
+            '''CREATE TABLE IF NOT EXISTS medical_records (
+                record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER,
+                doctor_id INTEGER,
+                visit_date DATE DEFAULT CURRENT_DATE,
+                diagnosis TEXT,
+                prescription TEXT,
+                lab_tests TEXT,
+                follow_up_date DATE,
+                height REAL,
+                weight REAL,
+                blood_pressure TEXT,
+                temperature REAL,
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
+                FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id)
+            )''',
+            
+            '''CREATE TABLE IF NOT EXISTS billing (
+                bill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER,
+                appointment_id INTEGER,
+                total_amount REAL,
+                payment_status TEXT DEFAULT 'Pending',
+                payment_method TEXT,
+                payment_date DATE,
+                insurance_provider TEXT,
+                insurance_amount REAL DEFAULT 0.0,
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
+                FOREIGN KEY (appointment_id) REFERENCES appointments(appointment_id)
+            )'''
+        ]
+        
+        for table in tables:
+            self.cursor.execute(table)
+        self.conn.commit()
+    
+    def add_patient(self, first_name: str, last_name: str, date_of_birth: str,
+                   gender: str, phone: str, email: str, address: str) -> int:
+        """Add a new patient to the system"""
+        query = '''INSERT INTO patients 
+                   (first_name, last_name, date_of_birth, gender, phone, email, address)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)'''
+        self.cursor.execute(query, (first_name, last_name, date_of_birth, gender, phone, email, address))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def schedule_appointment(self, patient_id: int, doctor_id: int, 
+                           appointment_date: str, appointment_time: str,
+                           reason: str = "") -> int:
+        """Schedule a new appointment"""
+        # Check doctor availability
+        query = '''SELECT available_days FROM doctors WHERE doctor_id = ?'''
+        self.cursor.execute(query, (doctor_id,))
+        result = self.cursor.fetchone()
+        
+        if result:
+            available_days = result[0].split(',')
+            appointment_day = datetime.strptime(appointment_date, '%Y-%m-%d').strftime('%A')
+            
+            if appointment_day not in available_days:
+                raise ValueError(f"Doctor not available on {appointment_day}")
+        
+        # Schedule appointment
+        query = '''INSERT INTO appointments 
+                   (patient_id, doctor_id, appointment_date, appointment_time, reason)
+                   VALUES (?, ?, ?, ?, ?)'''
+        self.cursor.execute(query, (patient_id, doctor_id, appointment_date, appointment_time, reason))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def add_medical_record(self, patient_id: int, doctor_id: int, diagnosis: str,
+                          prescription: str = "", lab_tests: str = "",
+                          height: float = 0.0, weight: float = 0.0,
+                          blood_pressure: str = "", temperature: float = 0.0):
+        """Add medical record for a patient"""
+        query = '''INSERT INTO medical_records 
+                   (patient_id, doctor_id, diagnosis, prescription, lab_tests,
+                    height, weight, blood_pressure, temperature)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+        self.cursor.execute(query, (patient_id, doctor_id, diagnosis, prescription,
+                                  lab_tests, height, weight, blood_pressure, temperature))
+        self.conn.commit()
+    
+    def generate_bill(self, patient_id: int, appointment_id: int, total_amount: float,
+                     insurance_provider: str = "", insurance_amount: float = 0.0) -> int:
+        """Generate a bill for a patient"""
+        query = '''INSERT INTO billing 
+                   (patient_id, appointment_id, total_amount, insurance_provider, insurance_amount)
+                   VALUES (?, ?, ?, ?, ?)'''
+        self.cursor.execute(query, (patient_id, appointment_id, total_amount,
+                                  insurance_provider, insurance_amount))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def get_patient_appointments(self, patient_id: int) -> List[Dict]:
+        """Get all appointments for a specific patient"""
+        query = '''SELECT a.*, d.first_name || ' ' || d.last_name as doctor_name,
+                          d.specialization
+                   FROM appointments a
+                   JOIN doctors d ON a.doctor_id = d.doctor_id
+                   WHERE a.patient_id = ?
+                   ORDER BY a.appointment_date DESC, a.appointment_time DESC'''
+        self.cursor.execute(query, (patient_id,))
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def search_patients(self, search_term: str) -> List[Dict]:
+        """Search patients by name, phone, or email"""
+        query = '''SELECT * FROM patients 
+                   WHERE first_name LIKE ? OR last_name LIKE ? 
+                   OR phone LIKE ? OR email LIKE ?
+                   ORDER BY last_name, first_name'''
+        search_pattern = f"%{search_term}%"
+        self.cursor.execute(query, (search_pattern, search_pattern, 
+                                  search_pattern, search_pattern))
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def get_doctor_schedule(self, doctor_id: int, date_from: str, date_to: str) -> List[Dict]:
+        """Get doctor's schedule for a date range"""
+        query = '''SELECT a.*, p.first_name || ' ' || p.last_name as patient_name,
+                          p.phone as patient_phone
+                   FROM appointments a
+                   JOIN patients p ON a.patient_id = p.patient_id
+                   WHERE a.doctor_id = ? 
+                   AND a.appointment_date BETWEEN ? AND ?
+                   ORDER BY a.appointment_date, a.appointment_time'''
+        self.cursor.execute(query, (doctor_id, date_from, date_to))
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def get_monthly_statistics(self, year: int, month: int) -> Dict:
+        """Get monthly statistics for the clinic"""
+        query_appointments = '''SELECT COUNT(*), status 
+                               FROM appointments 
+                               WHERE strftime('%Y', appointment_date) = ? 
+                               AND strftime('%m', appointment_date) = ?
+                               GROUP BY status'''
+        self.cursor.execute(query_appointments, (str(year), f"{month:02d}"))
+        appointments = dict(self.cursor.fetchall())
+        
+        query_revenue = '''SELECT COALESCE(SUM(total_amount - insurance_amount), 0)
+                          FROM billing 
+                          WHERE payment_status = 'Paid'
+                          AND strftime('%Y', payment_date) = ? 
+                          AND strftime('%m', payment_date) = ?'''
+        self.cursor.execute(query_revenue, (str(year), f"{month:02d}"))
+        revenue = self.cursor.fetchone()[0] or 0
+        
+        return {
+            'year': year,
+            'month': month,
+            'appointments': appointments,
+            'revenue': revenue,
+            'total_appointments': sum(appointments.values())
+        }
+    
+    def close(self):
+        """Close database connection"""
+        self.conn.close()
+
+
+# GUI Application using tkinter
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import datetime
+
+class ClinicManagementGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Clinic Management System")
+        self.root.geometry("1200x700")
+        
+        self.system = ClinicManagementSystem()
+        
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create tabs
+        self.patient_tab = ttk.Frame(self.notebook)
+        self.appointment_tab = ttk.Frame(self.notebook)
+        self.records_tab = ttk.Frame(self.notebook)
+        self.billing_tab = ttk.Frame(self.notebook)
+        self.reports_tab = ttk.Frame(self.notebook)
+        
+        self.notebook.add(self.patient_tab, text="Patient Management")
+        self.notebook.add(self.appointment_tab, text="Appointments")
+        self.notebook.add(self.records_tab, text="Medical Records")
+        self.notebook.add(self.billing_tab, text="Billing")
+        self.notebook.add(self.reports_tab, text="Reports")
+        
+        self.setup_patient_tab()
+        self.setup_appointment_tab()
+        self.setup_reports_tab()
+    
+    def setup_patient_tab(self):
+        # Patient registration form
+        frame = ttk.LabelFrame(self.patient_tab, text="Patient Registration", padding=10)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Form fields
+        ttk.Label(frame, text="First Name:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.first_name = ttk.Entry(frame, width=30)
+        self.first_name.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Add more fields...
+        
+        # Buttons
+        ttk.Button(frame, text="Register Patient", 
+                  command=self.register_patient).grid(row=10, column=0, columnspan=2, pady=10)
+        
+        # Patient list
+        list_frame = ttk.LabelFrame(self.patient_tab, text="Patient List", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Treeview for patients
+        columns = ("ID", "Name", "Phone", "Email", "Gender", "DOB")
+        self.patient_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        
+        for col in columns:
+            self.patient_tree.heading(col, text=col)
+            self.patient_tree.column(col, width=100)
+        
+        self.patient_tree.pack(fill=tk.BOTH, expand=True)
+    
+    def setup_appointment_tab(self):
+        # Similar setup for appointment tab
+        pass
+    
+    def setup_reports_tab(self):
+        # Setup reports tab
+        pass
+    
+    def register_patient(self):
+        # Implementation for patient registration
+        pass
+    
+    def load_patients(self):
+        # Load patients into treeview
+        pass
+
+if __name__ == "__main__":
+    # For command line interface
+    clinic = ClinicManagementSystem()
+    
+    # Example usage
+    patient_id = clinic.add_patient(
+        first_name="John",
+        last_name="Doe",
+        date_of_birth="1985-05-15",
+        gender="Male",
+        phone="123-456-7890",
+        email="john.doe@email.com",
+        address="123 Main St"
+    )
+    
+    print(f"Patient added with ID: {patient_id}")
+    
+    # For GUI application
+    # root = tk.Tk()
+    # app = ClinicManagementGUI(root)
+    # root.mainloop()
